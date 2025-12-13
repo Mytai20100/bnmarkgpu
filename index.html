@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPU Rendering Benchmark</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Courier New', monospace;
+            background: #0a0a0a;
+            color: #00ff00;
+            overflow: hidden;
+        }
+        #container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        #stats {
+            background: #1a1a1a;
+            padding: 10px;
+            border-bottom: 1px solid #00ff00;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+            font-size: 12px;
+        }
+        .stat {
+            display: flex;
+            justify-content: space-between;
+        }
+        #controls {
+            background: #1a1a1a;
+            padding: 10px;
+            border-bottom: 1px solid #00ff00;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+            align-items: center;
+        }
+        #quality {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-left: 20px;
+            padding-left: 20px;
+            border-left: 1px solid #00ff00;
+        }
+        #quality label {
+            font-size: 11px;
+        }
+        #geometry-controls, #env-controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-left: 20px;
+            padding-left: 20px;
+            border-left: 1px solid #00ff00;
+        }
+        #geometry-controls label, #env-controls label {
+            font-size: 11px;
+        }
+        button {
+            background: #0a0a0a;
+            color: #00ff00;
+            border: 1px solid #00ff00;
+            padding: 5px 10px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 11px;
+        }
+        button.active {
+            background: #00ff00;
+            color: #0a0a0a;
+        }
+        button:hover {
+            background: #003300;
+        }
+        #canvas {
+            flex: 1;
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="stats">
+            <div class="stat"><span>FPS:</span><span id="fps">0</span></div>
+            <div class="stat"><span>Frame Time:</span><span id="frametime">0ms</span></div>
+            <div class="stat"><span>CPU:</span><span id="cpu">0%</span></div>
+            <div class="stat"><span>RAM:</span><span id="ram">0MB</span></div>
+            <div class="stat"><span>GPU:</span><span id="gpu">Active</span></div>
+            <div class="stat"><span>Mode:</span><span id="mode">Ray Tracing</span></div>
+            <div class="stat"><span>Geometry:</span><span id="geometry">Cube</span></div>
+            <div class="stat"><span>Environment:</span><span id="environment">Space</span></div>
+        </div>
+        <div id="controls">
+            <button data-mode="raytracing" class="active">Ray Tracing</button>
+            <button data-mode="blinnphong">Blinn-Phong</button>
+            <button data-mode="lambert">Lambert</button>
+            <button data-mode="gouraud">Gouraud</button>
+            <button data-mode="phong">Phong</button>
+            <button data-mode="pbr">PBR</button>
+            <button data-mode="ibl">IBL</button>
+            <button data-mode="bakedgi">Baked GI</button>
+            <button data-mode="realtimegi">Realtime GI</button>
+            <button data-mode="shadows">Shadows</button>
+            <button data-mode="ssao">SSAO</button>
+            <button data-mode="pathtracing">Path Tracing</button>
+            <div id="quality">
+                <label>QUALITY:</label>
+                <button data-quality="1">LOW</button>
+                <button data-quality="2">MEDIUM</button>
+                <button data-quality="3" class="active">HIGH</button>
+                <button data-quality="4">ULTRA</button>
+                <button data-quality="5">EXTREME</button>
+            </div>
+            <div id="geometry-controls">
+                <label>GEOMETRY:</label>
+                <button data-geometry="cube" class="active">CUBE</button>
+                <button data-geometry="complex">COMPLEX</button>
+            </div>
+            <div id="env-controls">
+                <label>ENV:</label>
+                <button data-env="space" class="active">SPACE</button>
+                <button data-env="water">WATER</button>
+                <button data-env="clouds">CLOUDS</button>
+                <button data-env="all">ALL</button>
+            </div>
+        </div>
+        <canvas id="canvas"></canvas>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        let scene, camera, renderer, cube, light, light2, sun;
+        let currentMode = 'raytracing';
+        let qualityLevel = 3;
+        let geometryType = 'cube';
+        let environmentType = 'space';
+        let frameCount = 0;
+        let lastTime = performance.now();
+        let fps = 0;
+        let cpuUsage = 0;
+        let lights = [];
+        let fog;
+        let water, clouds = [];
+        let complexGeometry;
+        
+        const cameraSpeed = 0.1;
+        const keys = { w: false, a: false, s: false, d: false };
+        
+        const canvas = document.getElementById('canvas');
+        
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x050505);
+            
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / (window.innerHeight - 100), 0.1, 1000);
+            camera.position.set(0, 2, 5);
+            
+            renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight - 100);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            
+            const geometry = new THREE.BoxGeometry(2, 2, 2);
+            const material = new THREE.MeshStandardMaterial({ 
+                color: 0x00ff00,
+                metalness: 0.5,
+                roughness: 0.5
+            });
+            
+            cube = new THREE.Mesh(geometry, material);
+            cube.castShadow = true;
+            cube.receiveShadow = true;
+            scene.add(cube);
+            
+            light = new THREE.DirectionalLight(0xffffff, 1);
+            light.position.set(5, 5, 5);
+            light.castShadow = true;
+            light.shadow.mapSize.width = 2048;
+            light.shadow.mapSize.height = 2048;
+            scene.add(light);
+            lights.push(light);
+            
+            light2 = new THREE.PointLight(0x0088ff, 0.5);
+            light2.position.set(-3, 2, 3);
+            scene.add(light2);
+            lights.push(light2);
+            
+            const ambientLight = new THREE.AmbientLight(0x404040);
+            scene.add(ambientLight);
+            
+            sun = new THREE.DirectionalLight(0xfff5e6, 2);
+            sun.position.set(50, 50, 50);
+            sun.castShadow = true;
+            sun.shadow.camera.left = -20;
+            sun.shadow.camera.right = 20;
+            sun.shadow.camera.top = 20;
+            sun.shadow.camera.bottom = -20;
+            sun.shadow.camera.near = 0.5;
+            sun.shadow.camera.far = 200;
+            sun.shadow.mapSize.width = 4096;
+            sun.shadow.mapSize.height = 4096;
+            sun.shadow.bias = -0.0001;
+            scene.add(sun);
+            lights.push(sun);
+            
+            const planeGeometry = new THREE.PlaneGeometry(20, 20);
+            const planeMaterial = new THREE.MeshStandardMaterial({ color: 0x1a1a1a });
+            const plane = new THREE.Mesh(planeGeometry, planeMaterial);
+            plane.rotation.x = -Math.PI / 2;
+            plane.position.y = -2;
+            plane.receiveShadow = true;
+            scene.add(plane);
+            
+            createComplexGeometry();
+            createWater();
+            createClouds();
+            
+            window.addEventListener('resize', onResize);
+            
+            window.addEventListener('keydown', (e) => {
+                if (e.key.toLowerCase() === 'w') keys.w = true;
+                if (e.key.toLowerCase() === 'a') keys.a = true;
+                if (e.key.toLowerCase() === 's') keys.s = true;
+                if (e.key.toLowerCase() === 'd') keys.d = true;
+            });
+            
+            window.addEventListener('keyup', (e) => {
+                if (e.key.toLowerCase() === 'w') keys.w = false;
+                if (e.key.toLowerCase() === 'a') keys.a = false;
+                if (e.key.toLowerCase() === 's') keys.s = false;
+                if (e.key.toLowerCase() === 'd') keys.d = false;
+            });
+            
+            document.querySelectorAll('button[data-mode]').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    document.querySelectorAll('button[data-mode]').forEach(b => b.classList.remove('active'));
+                    e.target.classList.add('active');
+                    currentMode = e.target.dataset.mode;
+                    updateMode();
+                });
+            });
+            
+            document.querySelectorAll('button[data-quality]').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    document.querySelectorAll('button[data-quality]').forEach(b => b.classList.remove('active'));
+                    e.target.classList.add('active');
+                    qualityLevel = parseInt(e.target.dataset.quality);
+                    updateQuality();
+                });
+            });
+            
+            document.querySelectorAll('button[data-geometry]').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    document.querySelectorAll('button[data-geometry]').forEach(b => b.classList.remove('active'));
+                    e.target.classList.add('active');
+                    geometryType = e.target.dataset.geometry;
+                    updateGeometry();
+                });
+            });
+            
+            document.querySelectorAll('button[data-env]').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    document.querySelectorAll('button[data-env]').forEach(b => b.classList.remove('active'));
+                    e.target.classList.add('active');
+                    environmentType = e.target.dataset.env;
+                    updateEnvironment();
+                });
+            });
+            
+            let isDragging = false;
+            let previousMousePosition = { x: 0, y: 0 };
+            
+            canvas.addEventListener('mousedown', (e) => {
+                isDragging = true;
+                previousMousePosition = { x: e.clientX, y: e.clientY };
+            });
+            
+            canvas.addEventListener('mousemove', (e) => {
+                if (isDragging) {
+                    const deltaX = e.clientX - previousMousePosition.x;
+                    const deltaY = e.clientY - previousMousePosition.y;
+                    
+                    const angle = deltaX * 0.01;
+                    const x = camera.position.x;
+                    const z = camera.position.z;
+                    camera.position.x = x * Math.cos(angle) - z * Math.sin(angle);
+                    camera.position.z = x * Math.sin(angle) + z * Math.cos(angle);
+                    camera.lookAt(cube.position);
+                    
+                    previousMousePosition = { x: e.clientX, y: e.clientY };
+                }
+            });
+            
+            canvas.addEventListener('mouseup', () => {
+                isDragging = false;
+            });
+            
+            canvas.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                const distance = Math.sqrt(
+                    camera.position.x ** 2 + 
+                    camera.position.y ** 2 + 
+                    camera.position.z ** 2
+                );
+                const newDistance = Math.max(3, Math.min(15, distance + e.deltaY * 0.01));
+                const ratio = newDistance / distance;
+                camera.position.multiplyScalar(ratio);
+            });
+            
+            updateQuality();
+        }
+        
+        function createComplexGeometry() {
+            const group = new THREE.Group();
+            
+            for (let i = 0; i < 50; i++) {
+                const geometries = [
+                    new THREE.IcosahedronGeometry(0.3, 2),
+                    new THREE.TorusGeometry(0.3, 0.1, 16, 32),
+                    new THREE.OctahedronGeometry(0.3, 1),
+                    new THREE.TetrahedronGeometry(0.3, 0)
+                ];
+                
+                const geo = geometries[Math.floor(Math.random() * geometries.length)];
+                const mat = new THREE.MeshStandardMaterial({
+                    color: new THREE.Color().setHSL(Math.random(), 0.8, 0.5),
+                    metalness: 0.8,
+                    roughness: 0.2
+                });
+                
+                const mesh = new THREE.Mesh(geo, mat);
+                const angle = (i / 50) * Math.PI * 2;
+                const radius = 2 + Math.random() * 3;
+                mesh.position.set(
+                    Math.cos(angle) * radius,
+                    Math.sin(i * 0.5) * 2,
+                    Math.sin(angle) * radius
+                );
+                mesh.rotation.set(
+                    Math.random() * Math.PI,
+                    Math.random() * Math.PI,
+                    Math.random() * Math.PI
+                );
+                mesh.castShadow = true;
+                mesh.receiveShadow = true;
+                group.add(mesh);
+            }
+            
+            complexGeometry = group;
+            complexGeometry.visible = false;
+            scene.add(complexGeometry);
+        }
+        
+        function createWater() {
+            const waterGeometry = new THREE.PlaneGeometry(50, 50, 128, 128);
+            const waterMaterial = new THREE.MeshStandardMaterial({
+                color: 0x1a5f7a,
+                metalness: 0.9,
+                roughness: 0.1,
+                transparent: true,
+                opacity: 0.8
+            });
+            
+            water = new THREE.Mesh(waterGeometry, waterMaterial);
+            water.rotation.x = -Math.PI / 2;
+            water.position.y = -2;
+            water.receiveShadow = true;
+            water.visible = false;
+            scene.add(water);
+        }
+        
+        function createClouds() {
+            for (let i = 0; i < 30; i++) {
+                const cloudGroup = new THREE.Group();
+                
+                for (let j = 0; j < 5; j++) {
+                    const geo = new THREE.SphereGeometry(
+                        1 + Math.random() * 2,
+                        8,
+                        8
+                    );
+                    const mat = new THREE.MeshStandardMaterial({
+                        color: 0xffffff,
+                        transparent: true,
+                        opacity: 0.6,
+                        metalness: 0,
+                        roughness: 1
+                    });
+                    
+                    const sphere = new THREE.Mesh(geo, mat);
+                    sphere.position.set(
+                        (Math.random() - 0.5) * 4,
+                        (Math.random() - 0.5) * 2,
+                        (Math.random() - 0.5) * 4
+                    );
+                    cloudGroup.add(sphere);
+                }
+                
+                cloudGroup.position.set(
+                    (Math.random() - 0.5) * 60,
+                    15 + Math.random() * 10,
+                    (Math.random() - 0.5) * 60
+                );
+                cloudGroup.visible = false;
+                clouds.push(cloudGroup);
+                scene.add(cloudGroup);
+            }
+        }
+        
+        function updateGeometry() {
+            document.getElementById('geometry').textContent = geometryType.toUpperCase();
+            
+            if (geometryType === 'cube') {
+                cube.visible = true;
+                complexGeometry.visible = false;
+            } else {
+                cube.visible = false;
+                complexGeometry.visible = true;
+            }
+        }
+        
+        function updateEnvironment() {
+            document.getElementById('environment').textContent = environmentType.toUpperCase();
+            
+            water.visible = false;
+            clouds.forEach(c => c.visible = false);
+            scene.background = new THREE.Color(0x050505);
+            scene.fog = null;
+            
+            switch(environmentType) {
+                case 'space':
+                    scene.background = new THREE.Color(0x000000);
+                    break;
+                    
+                case 'water':
+                    water.visible = true;
+                    scene.background = new THREE.Color(0x87ceeb);
+                    sun.color.setHex(0xfff5e6);
+                    sun.intensity = 2.5;
+                    scene.fog = new THREE.Fog(0x87ceeb, 10, 100);
+                    break;
+                    
+                case 'clouds':
+                    clouds.forEach(c => c.visible = true);
+                    scene.background = new THREE.Color(0x87ceeb);
+                    sun.color.setHex(0xfff5e6);
+                    sun.intensity = 3;
+                    scene.fog = new THREE.FogExp2(0xbce6ff, 0.01);
+                    break;
+                    
+                case 'all':
+                    water.visible = true;
+                    clouds.forEach(c => c.visible = true);
+                    scene.background = new THREE.Color(0x87ceeb);
+                    sun.color.setHex(0xfff5e6);
+                    sun.intensity = 3.5;
+                    scene.fog = new THREE.FogExp2(0xbce6ff, 0.008);
+                    break;
+            }
+        }
+        
+        function updateQuality() {
+            lights.forEach(l => scene.remove(l));
+            lights = [];
+            
+            if (fog) scene.fog = null;
+            
+            lights.push(light, light2);
+            lights.forEach(l => scene.add(l));
+            
+            switch(qualityLevel) {
+                case 1:
+                    renderer.shadowMap.enabled = false;
+                    renderer.setPixelRatio(0.5);
+                    light.shadow.mapSize.set(512, 512);
+                    break;
+                    
+                case 2:
+                    renderer.shadowMap.enabled = true;
+                    renderer.setPixelRatio(1);
+                    light.shadow.mapSize.set(1024, 1024);
+                    break;
+                    
+                case 3:
+                    renderer.shadowMap.enabled = true;
+                    renderer.setPixelRatio(window.devicePixelRatio);
+                    light.shadow.mapSize.set(2048, 2048);
+                    break;
+                    
+                case 4:
+                    renderer.shadowMap.enabled = true;
+                    renderer.setPixelRatio(window.devicePixelRatio);
+                    light.shadow.mapSize.set(4096, 4096);
+                    
+                    for (let i = 0; i < 3; i++) {
+                        const extraLight = new THREE.PointLight(
+                            [0xff0000, 0x00ff00, 0x0000ff][i], 
+                            0.3
+                        );
+                        extraLight.position.set(
+                            Math.cos(i * 2.094) * 4,
+                            2,
+                            Math.sin(i * 2.094) * 4
+                        );
+                        scene.add(extraLight);
+                        lights.push(extraLight);
+                    }
+                    
+                    scene.fog = new THREE.Fog(0x050505, 5, 20);
+                    break;
+                    
+                case 5:
+                    renderer.shadowMap.enabled = true;
+                    renderer.setPixelRatio(window.devicePixelRatio * 2);
+                    light.shadow.mapSize.set(8192, 8192);
+                    sun.shadow.mapSize.set(8192, 8192);
+                    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+                    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+                    renderer.toneMappingExposure = 1.2;
+                    
+                    sun.intensity = 4;
+                    
+                    for (let i = 0; i < 20; i++) {
+                        const angle = (i / 20) * Math.PI * 2;
+                        const extraLight = new THREE.PointLight(
+                            new THREE.Color().setHSL(i / 20, 1, 0.5), 
+                            0.6
+                        );
+                        extraLight.position.set(
+                            Math.cos(angle) * 8,
+                            3 + Math.sin(angle * 3),
+                            Math.sin(angle) * 8
+                        );
+                        extraLight.castShadow = true;
+                        extraLight.shadow.mapSize.set(2048, 2048);
+                        scene.add(extraLight);
+                        lights.push(extraLight);
+                    }
+                    
+                    for (let i = 0; i < 10; i++) {
+                        const spotLight = new THREE.SpotLight(
+                            new THREE.Color().setHSL(i / 10, 0.8, 0.6), 
+                            1.5, 
+                            30, 
+                            Math.PI / 8, 
+                            0.3
+                        );
+                        const angle = (i / 10) * Math.PI * 2;
+                        spotLight.position.set(
+                            Math.cos(angle) * 10,
+                            15,
+                            Math.sin(angle) * 10
+                        );
+                        spotLight.target = cube;
+                        spotLight.castShadow = true;
+                        spotLight.shadow.mapSize.set(2048, 2048);
+                        scene.add(spotLight);
+                        lights.push(spotLight);
+                    }
+                    
+                    scene.fog = new THREE.FogExp2(0x050505, 0.05);
+                    break;
+            }
+            
+            updateMode();
+        }
+        
+        function updateMode() {
+            document.getElementById('mode').textContent = currentMode.toUpperCase();
+            
+            switch(currentMode) {
+                case 'raytracing':
+                    cube.material = new THREE.MeshStandardMaterial({ 
+                        color: 0x00ff00, metalness: 0.9, roughness: 0.1 
+                    });
+                    renderer.shadowMap.enabled = true;
+                    break;
+                case 'blinnphong':
+                    cube.material = new THREE.MeshPhongMaterial({ 
+                        color: 0x00ff00, shininess: 100 
+                    });
+                    renderer.shadowMap.enabled = true;
+                    break;
+                case 'lambert':
+                    cube.material = new THREE.MeshLambertMaterial({ 
+                        color: 0x00ff00 
+                    });
+                    renderer.shadowMap.enabled = false;
+                    break;
+                case 'gouraud':
+                    cube.material = new THREE.MeshLambertMaterial({ 
+                        color: 0x00ff00, flatShading: false 
+                    });
+                    renderer.shadowMap.enabled = false;
+                    break;
+                case 'phong':
+                    cube.material = new THREE.MeshPhongMaterial({ 
+                        color: 0x00ff00, shininess: 30 
+                    });
+                    renderer.shadowMap.enabled = true;
+                    break;
+                case 'pbr':
+                    cube.material = new THREE.MeshStandardMaterial({ 
+                        color: 0x00ff00, metalness: 0.7, roughness: 0.3 
+                    });
+                    renderer.shadowMap.enabled = true;
+                    break;
+                case 'ibl':
+                    cube.material = new THREE.MeshStandardMaterial({ 
+                        color: 0x00ff00, metalness: 1, roughness: 0, envMapIntensity: 2 
+                    });
+                    renderer.shadowMap.enabled = true;
+                    break;
+                case 'bakedgi':
+                    cube.material = new THREE.MeshBasicMaterial({ 
+                        color: 0x00ff00 
+                    });
+                    renderer.shadowMap.enabled = false;
+                    break;
+                case 'realtimegi':
+                    cube.material = new THREE.MeshStandardMaterial({ 
+                        color: 0x00ff00, metalness: 0.5, roughness: 0.5 
+                    });
+                    renderer.shadowMap.enabled = true;
+                    light.intensity = 1.5;
+                    break;
+                case 'shadows':
+                    cube.material = new THREE.MeshStandardMaterial({ 
+                        color: 0x00ff00 
+                    });
+                    renderer.shadowMap.enabled = true;
+                    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+                    break;
+                case 'ssao':
+                    cube.material = new THREE.MeshStandardMaterial({ 
+                        color: 0x00ff00, metalness: 0.3, roughness: 0.7 
+                    });
+                    renderer.shadowMap.enabled = true;
+                    break;
+                case 'pathtracing':
+                    cube.material = new THREE.MeshStandardMaterial({ 
+                        color: 0x00ff00, metalness: 0.9, roughness: 0.05 
+                    });
+                    renderer.shadowMap.enabled = true;
+                    break;
+            }
+        }
+        
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            const currentTime = performance.now();
+            const deltaTime = currentTime - lastTime;
+            
+            if (keys.w) {
+                const forward = new THREE.Vector3(0, 0, -1);
+                forward.applyQuaternion(camera.quaternion);
+                camera.position.add(forward.multiplyScalar(cameraSpeed));
+            }
+            if (keys.s) {
+                const backward = new THREE.Vector3(0, 0, 1);
+                backward.applyQuaternion(camera.quaternion);
+                camera.position.add(backward.multiplyScalar(cameraSpeed));
+            }
+            if (keys.a) {
+                const left = new THREE.Vector3(-1, 0, 0);
+                left.applyQuaternion(camera.quaternion);
+                camera.position.add(left.multiplyScalar(cameraSpeed));
+            }
+            if (keys.d) {
+                const right = new THREE.Vector3(1, 0, 0);
+                right.applyQuaternion(camera.quaternion);
+                camera.position.add(right.multiplyScalar(cameraSpeed));
+            }
+            
+            camera.lookAt(cube.position);
+            
+            const targetObj = geometryType === 'cube' ? cube : complexGeometry;
+            targetObj.rotation.x += 0.005;
+            targetObj.rotation.y += 0.005;
+            
+            if (water.visible) {
+                const positions = water.geometry.attributes.position;
+                for (let i = 0; i < positions.count; i++) {
+                    const x = positions.getX(i);
+                    const z = positions.getZ(i);
+                    const waveHeight = Math.sin(x * 0.5 + currentTime * 0.002) * 
+                                     Math.cos(z * 0.5 + currentTime * 0.002) * 0.3;
+                    positions.setY(i, waveHeight);
+                }
+                positions.needsUpdate = true;
+                water.geometry.computeVertexNormals();
+            }
+            
+            clouds.forEach((cloud, i) => {
+                if (cloud.visible) {
+                    cloud.position.x += Math.sin(currentTime * 0.0001 + i) * 0.01;
+                    cloud.position.z += Math.cos(currentTime * 0.0001 + i) * 0.01;
+                    cloud.rotation.y += 0.0005;
+                }
+            });
+            
+            const sunAngle = (currentTime * 0.0002) % (Math.PI * 2);
+            sun.position.set(
+                Math.cos(sunAngle) * 50,
+                Math.abs(Math.sin(sunAngle)) * 50 + 20,
+                Math.sin(sunAngle) * 50
+            );
+            
+            light.position.x = Math.sin(currentTime * 0.001) * 5;
+            light2.position.x = Math.cos(currentTime * 0.001) * 3;
+            
+            if (qualityLevel >= 4) {
+                lights.forEach((l, i) => {
+                    if (i > 1 && l.isPointLight) {
+                        const angle = (currentTime * 0.001) + (i * 0.8);
+                        l.position.x = Math.cos(angle) * 5;
+                        l.position.z = Math.sin(angle) * 5;
+                    }
+                });
+            }
+            
+            renderer.render(scene, camera);
+            
+            frameCount++;
+            if (deltaTime >= 1000) {
+                fps = Math.round((frameCount * 1000) / deltaTime);
+                document.getElementById('fps').textContent = fps;
+                document.getElementById('frametime').textContent = (deltaTime / frameCount).toFixed(2) + 'ms';
+                
+                if (performance.memory) {
+                    const memoryMB = (performance.memory.usedJSHeapSize / 1048576).toFixed(0);
+                    document.getElementById('ram').textContent = memoryMB + 'MB';
+                }
+                
+                cpuUsage = Math.min(100, Math.round((deltaTime / frameCount) * 6));
+                document.getElementById('cpu').textContent = cpuUsage + '%';
+                
+                frameCount = 0;
+                lastTime = currentTime;
+            }
+        }
+        
+        function onResize() {
+            camera.aspect = window.innerWidth / (window.innerHeight - 100);
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight - 100);
+        }
+        
+        init();
+        updateMode();
+        updateGeometry();
+        updateEnvironment();
+        animate();
+    </script>
+</body>
+</html>
